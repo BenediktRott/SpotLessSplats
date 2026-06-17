@@ -11,7 +11,7 @@ from sklearn.neighbors import kneighbors_graph
 import torch
 import torch.nn as nn
 from pycolmap import SceneManager
-import pandas
+import pandas as pd
 
 from .normalize import (
     align_principle_axes,
@@ -22,10 +22,17 @@ from .normalize import (
 
 
 def _get_rel_paths(path_dir: str) -> List[str]:
-    """Recursively get relative paths of files in a directory."""
+    """Recursively get relative paths of files in a directory, ignoring checkpoints."""
     paths = []
     for dp, dn, fn in os.walk(path_dir):
+        # Ignore .ipynb_checkpoints directories completely
+        if '.ipynb_checkpoints' in dp:
+            continue
+
         for f in fn:
+            # Ignore hidden files and checkpoint files
+            if f.startswith('.') or '-checkpoint' in f:
+                continue
             paths.append(os.path.relpath(os.path.join(dp, f), path_dir))
     return paths
 
@@ -278,13 +285,21 @@ class SemanticParser(Parser):
         )
         self.features = []
 
+
+
+        self.split_file_path = os.path.join(data_dir, "split.tsv")
+        self.split_file = pd.read_csv(self.split_file_path, sep='\t', index_col="filename")
+        split = "train" if load_keyword == "clutter" else "test"
+
         imdirectory = "images"
         if factor > 1:
             imdirectory = f"images_{factor}"
         for ind, impath in enumerate(self.image_paths):
             image_id = self.image_names[ind].split(".")[-2]
             cid = self.camera_ids[ind]
-            if self.image_names[ind].find(load_keyword) != -1:
+            img_name = self.image_names[ind]
+
+            if img_name in self.split_file.index and self.split_file.at[img_name, "split"] == split:
                 feature_path = os.path.join(
                     os.path.join(data_dir, semantic_dir), f"{image_id}.npy"
                 )
@@ -416,11 +431,22 @@ class ClutterDataset(Dataset):
         )
         indices = np.arange(len(self.parser.image_names))
         self.semantics = semantics
+
+        data_dir = parser.data_dir
+        self.split_file_path = os.path.join(data_dir, "split.tsv")
+        self.split_file = pd.read_csv(self.split_file_path, sep='\t', index_col="filename")
+
         if train_keyword == "":
             if split == "train":
                 self.indices = indices[indices % self.parser.test_every != 0]
             else:
                 self.indices = indices[indices % self.parser.test_every == 0]
+        elif os.path.exists(self.split_file_path):
+            self.indices = [
+                    idx
+                    for idx in indices
+                    if self.split_file.at[self.parser.image_names[idx], "split"] == split
+                ]
         else:
             if split == "train":
                 self.indices = [
