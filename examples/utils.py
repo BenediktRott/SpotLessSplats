@@ -140,6 +140,67 @@ class SpotLessModule(torch.nn.Module):
         return self.mlp(x)
 
 
+class SpotLessUNetModule(torch.nn.Module):
+    """SpotLess mask MLP predictor class."""
+
+    def __init__(self, num_classes: int, num_features: int):
+        super().__init__()
+        self.num_classes = num_classes
+        self.num_features = num_features
+
+        self.enc1 = nn.Sequential(
+            nn.Conv2d(num_features, 8, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(8, 8, kernel_size=3, padding=1),
+            nn.ReLU(),
+        )
+
+        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        self.enc2 = nn.Sequential(
+            nn.Conv2d(8, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(16, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+        )
+
+        # Decoder
+
+        self.deconv1 = nn.ConvTranspose2d(16, 8, kernel_size=2, stride=2)
+
+        self.mlp = nn.Sequential(
+            nn.Conv2d(16, 16, kernel_size=1),
+            nn.ReLU(),
+            nn.Conv2d(16, num_classes, kernel_size=1),
+            nn.Sigmoid(),
+        )
+
+    def softplus(self, x):
+        return torch.log(1 + torch.exp(x))
+
+    def get_regularizer(self):
+        return torch.max(abs(self.mlp[0].weight.data)) * torch.max(
+            abs(self.mlp[2].weight.data)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_skip = self.enc1(x)
+        x = self.pool1(x_skip)
+
+        x = self.enc2(x)
+        x = self.deconv1(x)
+
+        if x.shape[2:] != x_skip.shape[2:]:
+            diffY = x_skip.size()[2] - x.size()[2]
+            diffX = x_skip.size()[3] - x.size()[3]
+            x = F.pad(x, [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2])
+
+        x = torch.cat([x, x_skip], dim=1)
+
+        x = self.mlp(x)
+        return x
+
+
 def get_positional_encodings(
     height: int, width: int, num_frequencies: int, device: str = "cuda"
 ) -> torch.Tensor:

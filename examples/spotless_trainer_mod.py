@@ -28,7 +28,7 @@ from utils import (
     normalized_quat_to_rotmat,
     rgb_to_sh,
     set_random_seed,
-    SpotLessModule,
+    SpotLessUNetModule,
 )
 
 from gsplat.rendering import rasterization
@@ -370,7 +370,7 @@ class Runner:
         self.mlp_spotless = cfg.semantics and not cfg.cluster
         if self.mlp_spotless:
             # currently using positional encoding of order 20 (4*20 = 80)
-            self.spotless_module = SpotLessModule(
+            self.spotless_module = SpotLessUNetModule(
                 num_classes=1, num_features=self.trainset[0]["semantics"].shape[0] + 80
             ).cuda()
             self.spotless_optimizers = [
@@ -622,17 +622,21 @@ class Runner:
                         sf = nn.Upsample(
                             size=(colors.shape[1], colors.shape[2]),
                             mode="bilinear",
-                        )(sf).squeeze(0)
+                        )(sf)
                         pos_enc = get_positional_encodings(
                             colors.shape[1], colors.shape[2], 20
                         ).permute((2, 0, 1))
-                        sf = torch.cat([sf, pos_enc], dim=0)
-                        sf_flat = sf.reshape(sf.shape[0], -1).permute((1, 0))
+                        pos_enc = pos_enc.unsqueeze(0)
+                        sf = torch.cat([sf, pos_enc], dim=1)
+                        #sf_flat = sf.reshape(sf.shape[0], -1).permute((1, 0))
                         self.spotless_module.eval()
-                        pred_mask_up = self.spotless_module(sf_flat)
-                        pred_mask = pred_mask_up.reshape(
-                            1, colors.shape[1], colors.shape[2], 1
-                        )
+
+                        pred_mask_up = self.spotless_module(sf)
+                        #pred_mask_up = self.spotless_module(sf_flat)
+                        pred_mask = pred_mask_up.permute(0, 2, 3, 1)
+                        # pred_mask = pred_mask_up.reshape(
+                        #     1, colors.shape[1], colors.shape[2], 1
+                        # )
                         # calculate lower and upper bound masks for spotless mlp loss
                         lower_mask = self.robust_mask(
                             error_per_pixel, self.running_stats["lower_err"]
