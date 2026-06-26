@@ -28,7 +28,7 @@ from utils import (
     normalized_quat_to_rotmat,
     rgb_to_sh,
     set_random_seed,
-    SpotLessUNetModule,
+    SpotLessUNetModule, SpotLessModule,
 )
 
 from gsplat.rendering import rasterization
@@ -62,6 +62,8 @@ class Config:
     patch_size: Optional[int] = None
     # A global scaler that applies to the scene size related parameters
     global_scale: float = 1.0
+    # Enable U-Net
+    unet: bool = False
 
     # Port for the viewer server
     port: int = 8080
@@ -368,11 +370,20 @@ class Runner:
             ]
         self.spotless_optimizers = []
         self.mlp_spotless = cfg.semantics and not cfg.cluster
+        self.unet = cfg.unet
         if self.mlp_spotless:
             # currently using positional encoding of order 20 (4*20 = 80)
-            self.spotless_module = SpotLessUNetModule(
-                num_classes=1, num_features=self.trainset[0]["semantics"].shape[0] + 80
-            ).cuda()
+            if self.unet:
+                print("Using UNet")
+                self.spotless_module = SpotLessUNetModule(
+                    num_classes=1, num_features=self.trainset[0]["semantics"].shape[0] + 80
+                ).cuda()
+            else:
+                print("Using MLP")
+                self.spotless_module = SpotLessModule(
+                    num_classes=1, num_features=self.trainset[0]["semantics"].shape[0] + 80
+                ).cuda()
+
             self.spotless_optimizers = [
                 torch.optim.Adam(
                     self.spotless_module.parameters(),
@@ -619,24 +630,36 @@ class Runner:
                         pred_mask = self.robust_cluster_mask(pred_mask, semantics=sf)
                     else:
                         # use spotless mlp to predict the mask
-                        sf = nn.Upsample(
-                            size=(colors.shape[1], colors.shape[2]),
-                            mode="bilinear",
-                        )(sf)
-                        pos_enc = get_positional_encodings(
-                            colors.shape[1], colors.shape[2], 20
-                        ).permute((2, 0, 1))
-                        pos_enc = pos_enc.unsqueeze(0)
-                        sf = torch.cat([sf, pos_enc], dim=1)
-                        #sf_flat = sf.reshape(sf.shape[0], -1).permute((1, 0))
-                        self.spotless_module.eval()
+                        if self.unet:
+                            sf = nn.Upsample(
+                                size=(colors.shape[1], colors.shape[2]),
+                                mode="bilinear",
+                            )(sf)
+                            pos_enc = get_positional_encodings(
+                                colors.shape[1], colors.shape[2], 20
+                            ).permute((2, 0, 1))
+                            pos_enc = pos_enc.unsqueeze(0)
+                            sf = torch.cat([sf, pos_enc], dim=1)
+                            self.spotless_module.eval()
 
-                        pred_mask_up = self.spotless_module(sf)
-                        #pred_mask_up = self.spotless_module(sf_flat)
-                        pred_mask = pred_mask_up.permute(0, 2, 3, 1)
-                        # pred_mask = pred_mask_up.reshape(
-                        #     1, colors.shape[1], colors.shape[2], 1
-                        # )
+                            pred_mask_up = self.spotless_module(sf)
+                            pred_mask = pred_mask_up.permute(0, 2, 3, 1)
+                        else:
+                            sf = nn.Upsample(
+                                size=(colors.shape[1], colors.shape[2]),
+                                mode="bilinear",
+                            )(sf).squeeze(0)
+                            pos_enc = get_positional_encodings(
+                                colors.shape[1], colors.shape[2], 20
+                            ).permute((2, 0, 1))
+                            sf = torch.cat([sf, pos_enc], dim=0)
+                            sf_flat = sf.reshape(sf.shape[0], -1).permute((1, 0))
+                            self.spotless_module.eval()
+                            pred_mask_up = self.spotless_module(sf_flat)
+                            pred_mask = pred_mask_up.reshape(
+                                1, colors.shape[1], colors.shape[2], 1
+                            )
+
                         # calculate lower and upper bound masks for spotless mlp loss
                         lower_mask = self.robust_mask(
                             error_per_pixel, self.running_stats["lower_err"]
